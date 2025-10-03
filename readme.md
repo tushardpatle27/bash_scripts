@@ -1,4 +1,4 @@
-Installation of Software Components:
+Installation of Software Components (KAFKA):
 Download the following package which consists of the libraries and scripts to install the software required for Product Deployment.
 http://tookitaki-artifacts.tookitaki.com/artifactory/Software-packages/v5/softcomponents_kafka_v5.0.2.tar.gz
 The following are the dirs in the main directory of the above-downloaded file: 
