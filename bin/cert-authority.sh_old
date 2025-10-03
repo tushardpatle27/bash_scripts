@@ -1,0 +1,175 @@
+#!/bin/bash
+source=../conf/config.yaml
+
+KAFKA_SERVER_USERNAME=$(cat "$source" | grep ^KAFKA_SERVER_USERNAME | cut -d ":" -f 2 | sed 's/ //')
+KAFKA_BROKERS=$(cat $source | grep ^KAFKA_BROKERS | cut -d ":" -f 2 | sed 's/ //')
+CA_SERVER=$(cat $source | grep ^CA_SERVER | cut -d ":" -f 2 | sed 's/ //')
+SSL_CERTIFICATES_PATH=$(cat $source | grep ^SSL_CERTIFICATES_PATH | cut -d ":" -f 2 | sed 's/ //')
+SSL_CERTIFICATE_OU=$(cat $source | grep ^SSL_CERTIFICATE_OU | cut -d ":" -f 2 | sed 's/ //')
+SSL_CERTIFICATE_ORG=$(cat $source | grep ^SSL_CERTIFICATE_ORG | cut -d ":" -f 2 | sed 's/ //')
+SSL_CERTIFICATE_LOCATION=$(cat $source | grep ^SSL_CERTIFICATE_LOCATION | cut -d ":" -f 2 | sed 's/ //')
+SSL_CERTIFICATE_STATE=$(cat $source | grep ^SSL_CERTIFICATE_STATE | cut -d ":" -f 2 | sed 's/ //')
+SSL_CERTIFICATE_COUNTRY=$(cat $source | grep ^SSL_CERTIFICATE_COUNTRY | cut -d ":" -f 2 | sed 's/ //')
+SSL_KEYSTORE_PASS=$(cat $source | grep ^SSL_KEYSTORE_PASS | cut -d ":" -f 2 | sed 's/ //')
+SSL_CERTIFICATE_VALIDITY=$(cat $source | grep ^SSL_CERTIFICATE_VALIDITY | cut -d ":" -f 2 | sed 's/ //')
+TARGET_PATH=$(cat $source | grep ^TARGET_PATH | cut -d ":" -f 2 | sed 's/ //')
+
+function create_or_backup_dir (){
+IFS="," read -a servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do       
+       if [[ `ssh "$KAFKA_SERVER_USERNAME"@"$server" test -d "$SSL_CERTIFICATES_PATH/$server" && echo exists` ]];then
+              echo "SSL_CERTIFICATES_PATH exists on $server, hence taking backup and creating directory"
+              ssh $KAFKA_SERVER_USERNAME@$server "mv $SSL_CERTIFICATES_PATH/$server $SSL_CERTIFICATES_PATH/$server-bkp"
+              ssh $KAFKA_SERVER_USERNAME@$server "mkdir -p $SSL_CERTIFICATES_PATH/$server"
+       else
+              echo "SSL_CERTIFICATES_PATH does not exists on $server, hence creating the directory"
+              ssh $KAFKA_SERVER_USERNAME@$server "mkdir -p $SSL_CERTIFICATES_PATH/$server"      
+       fi
+done
+}
+
+function generate_root_ca_key_and_cert (){
+       echo "Generating RootCA in `hostname`"
+       openssl req -new -x509 -keyout $SSL_CERTIFICATES_PATH/ca-key -out $SSL_CERTIFICATES_PATH/ca-cert -days $SSL_CERTIFICATE_VALIDITY -passout pass:"$SSL_KEYSTORE_PASS" -subj "/C=$SSL_CERTIFICATE_COUNTRY/ST=$SSL_CERTIFICATE_STATE/L=$SSL_CERTIFICATE_LOCATION/O=$SSL_CERTIFICATE_ORG/OU=$SSL_CERTIFICATE_OU/CN=`host $CA_SERVER | awk '{ print substr($5, 1, length($5)-1 )}'`" > /dev/null 2>&1
+}
+
+function copy_root_ca_key_and_cert (){
+IFS=',' read -a servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do
+    if [[ ${server} == $CA_SERVER ]];then
+        continue
+    else
+        scp $SSL_CERTIFICATES_PATH/ca-key $KAFKA_SERVER_USERNAME@$server:$SSL_CERTIFICATES_PATH/$server
+        scp $SSL_CERTIFICATES_PATH/ca-cert $KAFKA_SERVER_USERNAME@$server:$SSL_CERTIFICATES_PATH/$server
+    fi
+done
+}
+
+function generate_truststore (){
+IFS=',' read -a servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do
+    echo "Generating Truststore in $server"
+    ssh "$KAFKA_SERVER_USERNAME"@"$server" "$JAVA_HOME"/bin/keytool -keystore $SSL_CERTIFICATES_PATH/$server/kafka.truststore.jks -alias `host $server | awk '{ print substr($5, 1, length($5)-1 )}'` -import -file $SSL_CERTIFICATES_PATH/$server/ca-cert -keypass "$SSL_KEYSTORE_PASS" -storepass "$SSL_KEYSTORE_PASS" -noprompt
+done
+}
+
+function generate_keystore (){
+IFS=',' read -a servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do
+    ssh "$KAFKA_SERVER_USERNAME"@"$server" "$JAVA_HOME"/bin/keytool -keystore $SSL_CERTIFICATES_PATH/$server/kafka.keystore.jks -alias `host $server | awk '{ print substr($5, 1, length($5)-1 )}'` -validity $SSL_CERTIFICATE_VALIDITY -genkey -keyalg RSA -ext SAN=DNS:`host $server | awk '{ print substr($5, 1, length($5)-1 )}'` -noprompt -dname "CN=`host $server | awk '{ print substr($5, 1, length($5)-1 )}'`" -storepass "$SSL_KEYSTORE_PASS" -keypass "$SSL_KEYSTORE_PASS"
+done    
+}
+
+function generate_csr (){
+IFS=',' read -ra servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do
+    ssh "$KAFKA_SERVER_USERNAME"@"$server" "$JAVA_HOME"/bin/keytool -keystore $SSL_CERTIFICATES_PATH/$server/kafka.keystore.jks -alias `host $server | awk '{ print substr($5, 1, length($5)-1 )}'` -certreq -file $SSL_CERTIFICATES_PATH/$server/ca-request-zookeeper -keypass "$SSL_KEYSTORE_PASS" -storepass "$SSL_KEYSTORE_PASS" -noprompt
+done    
+}
+
+function sign_certificate (){
+IFS=',' read -ra servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do
+    ssh "$KAFKA_SERVER_USERNAME"@"$server" /usr/bin/openssl x509 -req -CA $SSL_CERTIFICATES_PATH/$server/ca-cert -CAkey $SSL_CERTIFICATES_PATH/$server/ca-key -in $SSL_CERTIFICATES_PATH/$server/ca-request-zookeeper -out $SSL_CERTIFICATES_PATH/$server/ca-signed -days $SSL_CERTIFICATE_VALIDITY -CAcreateserial -passin pass:"$SSL_KEYSTORE_PASS"
+done    
+}
+
+function import_CA_to_keystore (){
+IFS=',' read -ra servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do
+    ssh "$KAFKA_SERVER_USERNAME"@"$server" "$JAVA_HOME"/bin/keytool -keystore $SSL_CERTIFICATES_PATH/$server/kafka.keystore.jks -alias ca-cert -import -file $SSL_CERTIFICATES_PATH/$server/ca-cert -storepass "$SSL_KEYSTORE_PASS" -noprompt  -keypass "$SSL_KEYSTORE_PASS"
+done
+}
+
+function import_signed_cert_to_keystore (){
+IFS=',' read -ra servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do
+    ssh "$KAFKA_SERVER_USERNAME"@"$server" "$JAVA_HOME"/bin/keytool -keystore $SSL_CERTIFICATES_PATH/$server/kafka.keystore.jks -alias `host $server | awk '{ print substr($5, 1, length($5)-1 )}'` -import -file $SSL_CERTIFICATES_PATH/$server/ca-signed -storepass "$SSL_KEYSTORE_PASS" -noprompt  -keypass "$SSL_KEYSTORE_PASS"
+done
+}
+
+function copy_certs_to_target (){
+IFS=',' read -ra servers <<< "$KAFKA_BROKERS"
+for server in ${servers[@]};
+do
+    ssh "$KAFKA_SERVER_USERNAME"@"$server" "cp -r $SSL_CERTIFICATES_PATH/$server/* $TARGET_PATH/"
+done
+}
+
+while true; do
+ echo
+echo "======================================================="
+echo " SSL/TLS CERTIFICATE CREATION PROCESS IN KAFKA SERVERS"
+echo "======================================================="
+echo
+echo "1)create_or_backup_dir"
+echo "2)generate_root_ca_key_and_cert"
+echo "3)copy_root_ca_key_and_cert"
+echo "4)generate_truststore"
+echo "5)generate_keystore"
+echo "6)generate_csr"
+echo "7)sign_certificate"
+echo "8)import_CA_to_keystore"
+echo "9)import_signed_cert_to_keystore"
+echo "10)copy_certs_to_target"
+echo
+echo "=========================================================="
+echo
+read -p "Ensure to Enter the option in the same order as mentioned above:" option
+echo
+case $option in
+    1)
+        echo "You have Entered $option, Hence Proceeding with create_or_backup_dir"
+        create_or_backup_dir
+        ;;
+    2)
+        echo "You have Entered $option, Hence Proceeding with generate_root_ca_key_and_cert"
+        generate_root_ca_key_and_cert
+        ;;
+    3)
+        echo "You have Entered $option, Hence Proceeding with copy_root_ca_key_and_cert"
+        copy_root_ca_key_and_cert
+        ;;
+    4)
+        echo "You have Entered $option, Hence Proceeding with generate_truststore"
+        generate_truststore
+        ;;
+    5)
+        echo "You have Entered $option, Hence Proceeding with generate_keystore"
+        generate_keystore
+        ;;
+    6)
+        echo "You have Entered $option, Hence Proceeding with generate_csr"
+        generate_csr
+        ;;
+    7)
+        echo "You have Entered $option, Hence Proceeding with sign_certificate"
+        sign_certificate
+        ;;
+    8)
+        echo -e "You have Entered $option, Hence Proceeding with import_CA_to_keystore"
+        import_CA_to_keystore
+        ;;
+    9)
+        echo "You have Entered $option, Hence Proceeding with import_signed_cert_to_keystore"
+        import_signed_cert_to_keystore
+        ;;
+    10)
+        echo "You have Entered $option, Hence Proceeding with copy_certs_to_target"
+        copy_certs_to_target
+        ;;        
+    *)
+        echo "You have Entered $option, It is Invalid Operation and Exiting. Hence Request to re-run the script & Choose between 1 to 10"
+        echo
+        break
+        ;;
+esac
+done

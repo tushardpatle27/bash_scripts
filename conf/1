@@ -1,0 +1,26 @@
+INSTALL_DIRECTORY=/home/ec2-user
+
+IS_SSL_REQUIRED=YES
+#if YES, please provide certs and password in kafka section.
+##********************************** JAVA  ********************************
+
+JAVA_SERVERS_IP=13.0.0.120,13.0.0.202,13.0.0.239
+JAVA_SERVERS_USERNAME=ec2-user
+JAVA_AUTH_MECH=KEY
+JAVA_SERVER_KEY_LOCATION=/home/ec2-user/.ssh/cluster-test.pem
+JAVA_SERVER_PASSWORD=null
+
+##********************************** KAFKA *******************************
+
+KAFKA_SERVERS_IP=13.0.0.120,13.0.0.202,13.0.0.239
+KAFKA_SERVERS_USERNAME=ec2-user
+KAFKA_AUTH_MECH=KEY
+KAFKA_SERVER_KEY_LOCATION=/home/ec2-user/.ssh/cluster-test.pem
+KAFKA_SERVER_PASSWORD=null
+
+#Below values are default, user needs to replace these to deploy kafka with ssl.
+truststore=/home/ec2-user/certs/kafka.truststore.jks
+truststorepasswd=changeme
+keystore=/home/ec2-user/certs/kafka.keystore.jks
+keystorepasswd=changeme
+keypasswd=changeme

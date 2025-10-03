@@ -1,0 +1,131 @@
+source ../conf/config.yaml  > /dev/null 2>&1
+install_dir=../libs
+install_dir1=../conf
+curr_dir=$(pwd)
+#set -e
+#hostname=`(hostname -f)`
+i=1
+bid=1
+
+echo "Please remove kafka under installation directory and zookeeper & kafka-logs unders tmp/data directory before installing kafka"
+conn_web(){
+
+        if [[ "$KAFKA_AUTH_MECH" == "KEY" ]];then
+                ssh -i "$KAFKA_SERVER_KEY_LOCATION" -o StrictHostKeyChecking=no  "$KAFKA_SERVERS_USERNAME"@"$t" $*
+        elif [[ "$KAFKA_AUTH_MECH" == "PASS" ]]; then
+                sshpass -p "$KAFKA_SERVER_PASSWORD" "$KAFKA_SERVERS_USERNAME"@"$t" $*
+        elif [[ "$KAFKA_AUTH_MECH" == "NIL" ]]; then
+                ssh "$KAFKA_SERVERS_USERNAME"@"$t" $*
+        else
+                echo "unexpected token type"; exit;
+        fi
+}
+conn_web2(){
+         if [[ "$KAFKA_AUTH_MECH" == "KEY" ]];then
+                scp -i "$KAFKA_SERVER_KEY_LOCATION" -r $*
+        elif [[ "$KAFKA_AUTH_MECH" == "PASS" ]]; then
+                sshpass -p "$KAFKA_SERVER_PASSWORD" scp $*
+        elif [[ "$KAFKA_AUTH_MECH" == "NIL" ]]; then
+                scp $*
+        else
+                echo "unexpected token type"; exit;
+        fi
+
+}
+IFS="," read -ra servers <<< "$KAFKA_SERVERS_IP"
+for t in "${servers[@]}"
+do
+
+echo "installing in host $t"
+if [ ! -d "$INSTALL_DIRECTORY"/tdss ];then
+echo "Directory does not exsist, creating tdss dir"
+conn_web mkdir "$INSTALL_DIRECTORY"/tdss
+fi
+
+
+conn_web source ~/.bashrc
+
+if [ -d "$INSTALL_DIRECTORY"/tdss/kafka ];then
+echo "Taking KAFKA Directory Backup  if any"
+conn_web mv "$INSTALL_DIRECTORY"/tdss/kafka "$INSTALL_DIRECTORY"/tdss/kafka_bkp
+fi
+
+
+#if [ -d /tmp/zookeeper ];then
+#conn_web mv /tmp/zookeeper /tmp/zookeeper_bkp
+#fi
+
+conn_web mkdir /tmp/zookeeper
+
+#if [ -d /tmp/kafka-logs ];then
+#conn_web mv /tmp/kafka-logs /tmp/kafka-logs_bkp
+#fi
+
+conn_web "echo $i > /tmp/zookeeper/myid"
+((i++))
+
+echo "Installing KAFKA"
+conn_web2 "$install_dir"/kafka_* "$KAFKA_SERVER_USERNAME"@"$t":"$INSTALL_DIRECTORY"/tdss/
+conn_web2 "$install_dir1"/config.yaml "$KAFKA_SERVER_USERNAME"@"$t":"$INSTALL_DIRECTORY"/tdss/
+#conn_web2 "$curr_dir"/RootCAgen.sh "$KAFKA_SERVER_USERNAME"@"$t":"$INSTALL_DIRECTORY"/tdss/
+conn_web2 "$curr_dir"/kafka_ssl_gen.sh "$KAFKA_SERVER_USERNAME"@"$t":"$INSTALL_DIRECTORY"/tdss/
+conn_web tar -xf "$INSTALL_DIRECTORY"/tdss/kafka_2.13-3.4.0.tgz -C"$INSTALL_DIRECTORY"/tdss/
+conn_web mv "$INSTALL_DIRECTORY"/tdss/kafka_2.13-3.4.0 "$INSTALL_DIRECTORY"/tdss/kafka
+conn_web rm -r "$INSTALL_DIRECTORY"/tdss/kafka_*.tgz
+
+if [[ "$IS_SSL_REQUIRED"  == "YES" ]]; then
+	echo "calling cert-authority script to generate certs"
+	conn_web "$INSTALL_DIRECTORY"/tdss/kafka_ssl_gen.sh
+	
+	echo "copying KAFKA SSL Templeted from src to kafka config directory"
+        conn_web2 "../src/*.properties" "$KAFKA_SERVER_USERNAME"@"$t":"$INSTALL_DIRECTORY"/tdss/kafka/config/
+
+        conn_web sed -i "s@truststorefilepath@"$truststore"@" "$INSTALL_DIRECTORY"/tdss/kafka/config/*.properties
+        conn_web sed -i "s@keystorefilepath@"$keystore"@" "$INSTALL_DIRECTORY"/tdss/kafka/config/*.properties
+        conn_web sed -i "s@truststorepasswd@"$truststorepasswd"@" "$INSTALL_DIRECTORY"/tdss/kafka/config/*.properties
+        conn_web sed -i "s@keystorepasswd@"$keystorepasswd"@" "$INSTALL_DIRECTORY"/tdss/kafka/config/*.properties
+        conn_web sed -i "s@keypasswd@"$keypasswd"@" "$INSTALL_DIRECTORY"/tdss/kafka/config/*.properties
+
+        echo "replcaing values in server.properties file"
+        conn_web sed -i "s@broker.id=.*@broker.id=$bid@" "$INSTALL_DIRECTORY"/tdss/kafka/config/server.properties
+        conn_web sed -i "s@hostfqdn1@${servers[0]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/server.properties
+        conn_web sed -i "s@hostfqdn2@${servers[1]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/server.properties
+        conn_web sed -i "s@hostfqdn3@${servers[2]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/server.properties
+	conn_web sed -i "s@hostname@$t@" "$INSTALL_DIRECTORY"/tdss/kafka/config/server.properties
+
+        echo "replacing values in zookeeper.properties file"
+        conn_web sed -i "s@hostfqdn1@${servers[0]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/zookeeper.properties
+        conn_web sed -i "s@hostfqdn2@${servers[1]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/zookeeper.properties
+        conn_web sed -i "s@hostfqdn3@${servers[2]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/zookeeper.properties
+
+        echo "replacing values in producer.properties file"
+        conn_web sed -i "s@hostfqdn1@${servers[0]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/producer.properties
+        conn_web sed -i "s@hostfqdn2@${servers[1]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/producer.properties
+        conn_web sed -i "s@hostfqdn3@${servers[2]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/producer.properties
+
+        echo "replacing values in consumer.properties file"
+        conn_web sed -i "s@hostfqdn1@${servers[0]}@" "$INSTALL_DIRECTORY"/tdss/kafka/config/consumer.properties
+
+fi
+
+((bid++))
+
+echo "Starting Zookeeper"
+conn_web "$INSTALL_DIRECTORY"/tdss/kafka/bin/zookeeper-server-start.sh -daemon "$INSTALL_DIRECTORY"/tdss/kafka/config/zookeeper.properties
+sleep 3
+echo "Starting KAFKA"
+conn_web "$INSTALL_DIRECTORY"/tdss/kafka/bin/kafka-server-start.sh -daemon "$INSTALL_DIRECTORY"/tdss/kafka/config/server.properties
+sleep 3
+
+done
+
+echo "checking for kafka version"
+conn_web "$INSTALL_DIRECTORY"/tdss/kafka/bin/kafka-topics.sh --version
+sleep 2
+#echo "Creating Topic"
+#conn_web "$INSTALL_DIRECTORY"/tdss/kafka/bin/kafka-topics.sh --create --topic Test --bootstrap-server $t:9093
+
+echo "To list and describe topics use below commands"
+echo "$INSTALL_DIRECTORY/tdss/kafka/bin/kafka-topics.sh --list --topic Test --bootstrap-server ${servers[0]}:9093"
+echo "$INSTALL_DIRECTORY/tdss/kafka/bin/kafka-topics.sh --describe --topic Test --bootstrap-server ${servers[0]}:9093"
+
