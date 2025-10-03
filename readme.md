@@ -47,3 +47,17 @@ Import the signed certificate into Keystore
 
 This script (install_kafka.sh) will install three zookeepers and three kafka brokers on three nodes.
 
+
+
+Note - 
+
+add this files in libs from apache website archives - 
+
+/softcomponents_kafka/libs
+
+tusharpatle@ip-192-168-1-4 libs % du -s -h *
+4.0K	RootCAgen.sh
+143M	jdk-8u351-linux-x64.tar.gz
+101M	kafka_2.13-3.4.0.tgz
+4.0K	kafka_ssl_gen.sh
+ 28K	libaio-0.3.109-13.el7.x86_64.rpm
